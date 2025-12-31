@@ -1,0 +1,5 @@
+{
+  "name": "Student Grades Viewer",
+  "description": "A modern React application to visualize student grades from JSON data with sheet switching capabilities.",
+  "requestFramePermissions": []
+}

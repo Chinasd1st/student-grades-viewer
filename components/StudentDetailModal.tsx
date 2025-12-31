@@ -1,0 +1,214 @@
+import React, { useMemo } from 'react';
+import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Tooltip } from 'recharts';
+
+interface Props {
+  isOpen: boolean;
+  onClose: () => void;
+  data: {
+    columns: string[];
+    row: (string | number | null)[];
+  } | null;
+}
+
+const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
+  if (!isOpen || !data) return null;
+
+  const { columns, row } = data;
+
+  // 1. 提取基础信息
+  const nameIdx = columns.findIndex(c => /姓名|Name/i.test(c));
+  const classIdx = columns.findIndex(c => /班级|Class/i.test(c));
+  const idIdx = columns.findIndex(c => /号|ID/i.test(c));
+  
+  // 提取总分和排名用于Header展示
+  const totalIdx = columns.findIndex(c => /总分|Total/i.test(c));
+  const rankIdx = columns.findIndex(c => /校次|Rank/i.test(c));
+
+  const studentName = nameIdx !== -1 ? row[nameIdx] : '未命名';
+  const className = classIdx !== -1 ? row[classIdx] : '';
+  const studentId = idIdx !== -1 ? row[idIdx] : '';
+  const totalScore = totalIdx !== -1 ? row[totalIdx] : null;
+  const rank = rankIdx !== -1 ? row[rankIdx] : null;
+
+  // 2. 智能解析科目数据
+  const subjectData = useMemo(() => {
+    return columns.map((col, idx) => {
+      // 过滤非数值列
+      const val = row[idx];
+      if (typeof val !== 'number') return null;
+
+      // 过滤不需要分析的列 (ID, Rank, Class)
+      if (/号|ID|班级|Class|姓名|Name|Rank|次/.test(col)) return null;
+
+      // 判断科目属性
+      const isMainSubject = /语文|数学|英语|English|Chinese|Math/.test(col) && !/语数英/.test(col);
+      const isComposite = /\+|语数英|总分|Total/.test(col); // 包含+号或特定组合名的视为组合科目
+
+      // 设定满分标准 (预估)
+      let fullMark = 100;
+      if (isMainSubject) fullMark = 150;
+      // 组合科目暂不设定统一满分用于雷达图（因为不画雷达图），但在列表中可能需要
+
+      return {
+        subject: col,
+        score: val,
+        fullMark: fullMark,
+        isMainSubject,
+        isComposite, // 标记是否为组合科目
+        normalized: isComposite ? 0 : (val / fullMark) * 100 // 组合科目不计算归一化分数用于雷达图
+      };
+    }).filter((item): item is { subject: string; score: number; fullMark: number; isMainSubject: boolean; isComposite: boolean; normalized: number } => item !== null);
+  }, [columns, row]);
+
+  // 3. 雷达图数据：仅包含单科
+  const radarData = useMemo(() => {
+    return subjectData.filter(item => !item.isComposite);
+  }, [subjectData]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 transition-opacity duration-300" onClick={onClose}>
+      <div 
+        className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col animate-[fadeIn_0.25s_ease-out]"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header Section */}
+        <div className="p-6 border-b border-gray-100 dark:border-gray-700 bg-gradient-to-r from-gray-50 to-white dark:from-gray-900 dark:to-gray-800 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="flex items-center gap-4">
+            <div className="h-14 w-14 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 text-xl font-bold border-2 border-white dark:border-gray-700 shadow-sm">
+              {String(studentName).charAt(0)}
+            </div>
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 dark:text-white flex items-center gap-3">
+                {studentName}
+                {className && <span className="text-xs font-medium text-gray-500 dark:text-gray-400 px-2 py-0.5 rounded-full border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800">{className}</span>}
+              </h2>
+              {studentId && <p className="text-sm text-gray-400 font-mono tracking-wide mt-0.5">#{studentId}</p>}
+            </div>
+          </div>
+
+          <div className="flex gap-4">
+            {totalScore !== null && (
+              <div className="flex flex-col items-end">
+                <span className="text-xs text-gray-500 uppercase tracking-wider font-semibold">总分</span>
+                <span className="text-3xl font-black text-blue-600 dark:text-blue-400 leading-none">{totalScore}</span>
+              </div>
+            )}
+            {rank !== null && (
+              <div className="flex flex-col items-end pl-4 border-l border-gray-200 dark:border-gray-700">
+                <span className="text-xs text-gray-500 uppercase tracking-wider font-semibold">校次</span>
+                <span className="text-3xl font-black text-gray-800 dark:text-white leading-none">#{rank}</span>
+              </div>
+            )}
+            <button 
+              onClick={onClose} 
+              className="ml-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-2 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors self-start sm:self-center"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Content Section */}
+        <div className="flex-1 overflow-auto bg-gray-50/50 dark:bg-gray-900/50 p-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+            
+            {/* Left: Radar Chart */}
+            <div className="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col min-h-[300px]">
+               <div className="mb-4 flex justify-between items-center">
+                 <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-2">
+                   <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>
+                   单科均衡度分析
+                 </h3>
+                 <span className="text-xs text-gray-400">* 仅展示单科成绩</span>
+               </div>
+               <div className="flex-1 w-full relative">
+                {radarData.length > 2 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
+                      <PolarGrid stroke="#e5e7eb" strokeOpacity={0.5} />
+                      <PolarAngleAxis dataKey="subject" tick={{ fill: '#6b7280', fontSize: 12, fontWeight: 500 }} />
+                      <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
+                      <Radar
+                        name="得分率 (%)"
+                        dataKey="normalized"
+                        stroke="#3b82f6"
+                        strokeWidth={2}
+                        fill="#3b82f6"
+                        fillOpacity={0.3}
+                      />
+                      <Tooltip 
+                        formatter={(value: number) => [`${value.toFixed(1)}%`, '得分率']}
+                        contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.95)' }}
+                      />
+                    </RadarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-400 text-sm">单科数据不足以绘制图表</div>
+                )}
+               </div>
+            </div>
+
+            {/* Right: Detailed Table */}
+            <div className="flex flex-col bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden">
+              <div className="p-4 border-b border-gray-100 dark:border-gray-700 bg-white dark:bg-gray-800">
+                <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-2">
+                  <svg className="w-4 h-4 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" /></svg>
+                  详细成绩列表
+                </h3>
+              </div>
+              <div className="flex-1 overflow-auto scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-gray-600">
+                <table className="min-w-full divide-y divide-gray-100 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-900 sticky top-0 z-10">
+                    <tr>
+                      <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">科目</th>
+                      <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">得分</th>
+                      <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">满分*</th>
+                      <th className="px-5 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">评级</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-100 dark:divide-gray-700">
+                    {subjectData.map((item, i) => (
+                      <tr key={i} className={`
+                        transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/50
+                        ${item.isComposite ? 'bg-blue-50/50 dark:bg-blue-900/10' : ''}
+                      `}>
+                        <td className="px-5 py-3 text-sm font-medium text-gray-900 dark:text-white">
+                          {item.subject}
+                          {item.isComposite && <span className="ml-2 text-[10px] text-blue-500 border border-blue-200 px-1 rounded bg-white">组合</span>}
+                        </td>
+                        <td className={`px-5 py-3 text-sm text-right font-mono font-bold ${item.isComposite ? 'text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-300'}`}>
+                          {item.score}
+                        </td>
+                        <td className="px-5 py-3 text-sm text-right text-gray-400 font-mono">
+                          {item.isComposite ? '-' : item.fullMark}
+                        </td>
+                        <td className="px-5 py-3 text-sm text-center">
+                          {item.isComposite ? (
+                            <span className="text-gray-400">-</span>
+                          ) : (
+                            (() => {
+                              const ratio = item.score / item.fullMark;
+                              if (ratio >= 0.9) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">A+</span>;
+                              if (ratio >= 0.85) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">A</span>;
+                              if (ratio < 0.6) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">E</span>;
+                              return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">P</span>;
+                            })()
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 dark:bg-gray-900/30 border-t border-gray-100 dark:border-gray-700 text-[10px] text-gray-400 text-center">
+                * 满分值基于通用标准估算，仅供参考
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default StudentDetailModal;
