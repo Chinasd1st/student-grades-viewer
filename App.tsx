@@ -3,41 +3,29 @@ import SheetSelector from './components/SheetSelector';
 import DataTable from './components/DataTable';
 import StatsDashboard from './components/StatsDashboard';
 import { AppData } from './types';
+import jsonData from './data.json';
 
 type ViewMode = 'table' | 'stats';
 
 const App: React.FC = () => {
-  const [data, setData] = useState<AppData | null>(null);
+  // Initialize state directly with imported data
+  const [data, setData] = useState<AppData | null>(jsonData as unknown as AppData);
   const [activeSheet, setActiveSheet] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('table');
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Fetch data from local JSON file
-    fetch('./data.json')
-      .then(response => {
-        if (!response.ok) {
-          throw new Error('Network response was not ok');
-        }
-        return response.json();
-      })
-      .then((jsonData: AppData) => {
-        setData(jsonData);
-        if (jsonData.sheetNames && jsonData.sheetNames.length > 0) {
-          setActiveSheet(jsonData.sheetNames[0]);
-        }
-      })
-      .catch(err => {
-        console.error('Failed to load data:', err);
-        setError('Failed to load data. Please check if data.json exists in the root directory.');
-      });
+    // Initialize active sheet if data is available
+    if (data && data.sheetNames && data.sheetNames.length > 0 && !activeSheet) {
+      setActiveSheet(data.sheetNames[0]);
+    }
 
     // Check system preference for dark mode
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       setDarkMode(true);
     }
-  }, []);
+  }, [data]); // Add data dependency although it's static now
 
   useEffect(() => {
     if (darkMode) {
