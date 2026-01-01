@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Sheet } from '../types';
 import { exportToCSV } from '../utils/exportUtils';
 import StudentDetailModal from './StudentDetailModal';
+import { getGradeAttributes, getFullMark } from '../utils/statsUtils';
 
 interface DataTableProps {
   data: Sheet;
@@ -229,21 +230,33 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
   const getCellClass = (val: any, colName: string) => {
     if (typeof val !== 'number') return 'text-left text-gray-700 dark:text-gray-300';
     let baseClass = 'font-mono text-right ';
+    
+    if (isExcludedColumn(colName)) return baseClass + 'text-gray-600 dark:text-gray-400';
+
     if (isCompositeColumn(colName)) {
         if (/总分|Total/.test(colName)) return baseClass + 'font-extrabold text-indigo-700 dark:text-indigo-400 text-base';
         return baseClass + 'font-bold text-blue-600 dark:text-blue-400';
     }
-    if (isExcludedColumn(colName)) return baseClass + 'text-gray-600 dark:text-gray-400';
 
-    const isMainSubject = /语文|数学|英语|English|Chinese|Math/.test(colName);
-    const maxScore = isMainSubject ? 150 : 100;
-    const passScore = maxScore * 0.6;
-    const topScore = maxScore * 0.9;
-    const excellentScore = maxScore * 0.85;
+    // Use refined grading coloring with NO background for table alignment
+    const fullMark = getFullMark(colName);
+    const gradeAttr = getGradeAttributes(val, fullMark);
+    
+    if (gradeAttr) {
+        // Map labels to strict text colors
+        switch (gradeAttr.label) {
+            case 'A+': return baseClass + 'text-emerald-700 dark:text-emerald-400 font-extrabold';
+            case 'A':  return baseClass + 'text-green-600 dark:text-green-400 font-bold';
+            case 'A-': return baseClass + 'text-lime-600 dark:text-lime-400 font-semibold';
+            case 'B+': return baseClass + 'text-blue-600 dark:text-blue-400 font-medium';
+            case 'B':  return baseClass + 'text-sky-600 dark:text-sky-400';
+            case 'B-': return baseClass + 'text-cyan-600 dark:text-cyan-400';
+            case 'C':  return baseClass + 'text-yellow-600 dark:text-yellow-500';
+            case 'D':  return baseClass + 'text-red-600 dark:text-red-400 font-bold';
+            default:   return baseClass + 'text-gray-700 dark:text-gray-300';
+        }
+    }
 
-    if (val < passScore) return baseClass + 'text-red-500 font-bold bg-red-50/50 dark:bg-red-900/10 rounded px-1';
-    if (val >= topScore) return baseClass + 'text-purple-600 dark:text-purple-400 font-bold';
-    if (val >= excellentScore) return baseClass + 'text-green-600 dark:text-green-400 font-bold';
     return baseClass + 'text-gray-700 dark:text-gray-300';
   };
 

@@ -3,6 +3,7 @@ import SheetSelector from './components/SheetSelector';
 import DataTable from './components/DataTable';
 import StatsDashboard from './components/StatsDashboard';
 import { AppData } from './types';
+// Ensure strictly relative path to avoid resolution errors
 import jsonData from './data.json';
 
 type ViewMode = 'table' | 'stats';
@@ -25,7 +26,7 @@ const App: React.FC = () => {
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       setDarkMode(true);
     }
-  }, [data]); // Add data dependency although it's static now
+  }, [data]); 
 
   useEffect(() => {
     if (darkMode) {

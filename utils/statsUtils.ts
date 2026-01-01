@@ -70,6 +70,22 @@ export const getFullMark = (colName: string): number => {
     return 100;
 };
 
+// Helper for Grade Classification
+// These colors are primarily for Badges (Modal view). Table view uses text-only styles.
+export const getGradeAttributes = (score: number, fullMark: number) => {
+  if (fullMark <= 0) return null;
+  const ratio = score / fullMark;
+  
+  if (ratio >= 0.95) return { label: 'A+', color: 'text-emerald-700 bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300 border-emerald-200' };
+  if (ratio >= 0.90) return { label: 'A',  color: 'text-green-700 bg-green-100 dark:bg-green-900/40 dark:text-green-300 border-green-200' };
+  if (ratio >= 0.85) return { label: 'A-', color: 'text-lime-700 bg-lime-100 dark:bg-lime-900/40 dark:text-lime-300 border-lime-200' };
+  if (ratio >= 0.80) return { label: 'B+', color: 'text-blue-700 bg-blue-100 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200' };
+  if (ratio >= 0.75) return { label: 'B',  color: 'text-sky-700 bg-sky-100 dark:bg-sky-900/40 dark:text-sky-300 border-sky-200' };
+  if (ratio >= 0.70) return { label: 'B-', color: 'text-cyan-700 bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 border-cyan-200' };
+  if (ratio >= 0.60) return { label: 'C',  color: 'text-yellow-700 bg-yellow-100 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200' };
+  return { label: 'D', color: 'text-red-700 bg-red-100 dark:bg-red-900/40 dark:text-red-300 border-red-200' };
+};
+
 // Calculate Pass/Excellence Stats
 export interface PassStats {
   excellent: number; // >= 85%

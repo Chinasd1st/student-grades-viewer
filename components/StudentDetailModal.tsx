@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Tooltip } from 'recharts';
+import { getGradeAttributes } from '../utils/statsUtils';
 
 interface Props {
   isOpen: boolean;
@@ -22,13 +23,13 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
   
   // 提取总分和排名用于Header展示
   const totalIdx = columns.findIndex(c => /总分|Total/i.test(c));
-  const rankIdx = columns.findIndex(c => /校次|Rank/i.test(c));
+  const mainRankIdx = columns.findIndex(c => c === '校次' || c === 'Rank' || c === '总分校次');
 
   const studentName = nameIdx !== -1 ? row[nameIdx] : '未命名';
   const className = classIdx !== -1 ? row[classIdx] : '';
   const studentId = idIdx !== -1 ? row[idIdx] : '';
   const totalScore = totalIdx !== -1 ? row[totalIdx] : null;
-  const rank = rankIdx !== -1 ? row[rankIdx] : null;
+  const mainRank = mainRankIdx !== -1 ? row[mainRankIdx] : null;
 
   // 2. 智能解析科目数据
   const subjectData = useMemo(() => {
@@ -60,10 +61,35 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
     }).filter((item): item is { subject: string; score: number; fullMark: number; isMainSubject: boolean; isComposite: boolean; normalized: number } => item !== null);
   }, [columns, row]);
 
-  // 3. 雷达图数据：仅包含单科
+  // 3. 雷达图数据：仅包含单科，且分数有效（非0）
   const radarData = useMemo(() => {
-    return subjectData.filter(item => !item.isComposite);
+    return subjectData.filter(item => !item.isComposite && item.score > 0);
   }, [subjectData]);
+
+  // 4. 提取组合排名 (Combination Ranks)
+  const combinationRanks = useMemo(() => {
+    const ranks: { name: string; rank: number; score?: number }[] = [];
+    columns.forEach((col, idx) => {
+        // Find columns ending with "校次" or "Rank" but ignore the main rank if needed
+        if ((col.endsWith('校次') || col.endsWith('Rank')) && idx !== mainRankIdx) {
+            // Extract base name (e.g., "语数英校次" -> "语数英")
+            const baseName = col.replace(/校次|Rank/g, '');
+            // Find corresponding score column if exists
+            const scoreIdx = columns.findIndex(c => c === baseName);
+            const scoreVal = scoreIdx !== -1 ? row[scoreIdx] : undefined;
+            const rankVal = row[idx];
+
+            if (typeof rankVal === 'number') {
+                ranks.push({
+                    name: baseName || '其他', // Fallback name
+                    rank: rankVal,
+                    score: typeof scoreVal === 'number' ? scoreVal : undefined
+                });
+            }
+        }
+    });
+    return ranks;
+  }, [columns, row, mainRankIdx]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 transition-opacity duration-300" onClick={onClose}>
@@ -93,10 +119,10 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                 <span className="text-3xl font-black text-blue-600 dark:text-blue-400 leading-none">{totalScore}</span>
               </div>
             )}
-            {rank !== null && (
+            {mainRank !== null && (
               <div className="flex flex-col items-end pl-4 border-l border-gray-200 dark:border-gray-700">
                 <span className="text-xs text-gray-500 uppercase tracking-wider font-semibold">校次</span>
-                <span className="text-3xl font-black text-gray-800 dark:text-white leading-none">#{rank}</span>
+                <span className="text-3xl font-black text-gray-800 dark:text-white leading-none">#{mainRank}</span>
               </div>
             )}
             <button 
@@ -109,9 +135,24 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
         </div>
 
         {/* Content Section */}
-        <div className="flex-1 overflow-auto bg-gray-50/50 dark:bg-gray-900/50 p-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
-            
+        <div className="flex-1 overflow-auto bg-gray-50/50 dark:bg-gray-900/50 p-6 space-y-6">
+          
+          {/* Combination Ranks Section */}
+          {combinationRanks.length > 0 && (
+             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                {combinationRanks.map((item, idx) => (
+                    <div key={idx} className="bg-white dark:bg-gray-800 p-3 rounded-lg shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col justify-between">
+                        <span className="text-xs text-gray-500 dark:text-gray-400 truncate font-medium mb-1" title={item.name}>{item.name}排名</span>
+                        <div className="flex items-baseline justify-between">
+                            <span className="text-lg font-bold text-gray-800 dark:text-gray-100">#{item.rank}</span>
+                            {item.score !== undefined && <span className="text-xs text-gray-400 font-mono">{item.score}分</span>}
+                        </div>
+                    </div>
+                ))}
+             </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Left: Radar Chart */}
             <div className="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col min-h-[300px]">
                <div className="mb-4 flex justify-between items-center">
@@ -119,7 +160,7 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                    <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>
                    单科均衡度分析
                  </h3>
-                 <span className="text-xs text-gray-400">* 仅展示单科成绩</span>
+                 <span className="text-xs text-gray-400">* 仅展示单科成绩（滤除0分）</span>
                </div>
                <div className="flex-1 w-full relative">
                 {radarData.length > 2 ? (
@@ -143,7 +184,7 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                     </RadarChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div className="flex items-center justify-center h-full text-gray-400 text-sm">单科数据不足以绘制图表</div>
+                  <div className="flex items-center justify-center h-full text-gray-400 text-sm">有效单科数据不足以绘制图表</div>
                 )}
                </div>
             </div>
@@ -187,11 +228,11 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                             <span className="text-gray-400">-</span>
                           ) : (
                             (() => {
-                              const ratio = item.score / item.fullMark;
-                              if (ratio >= 0.9) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">A+</span>;
-                              if (ratio >= 0.85) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300">A</span>;
-                              if (ratio < 0.6) return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">E</span>;
-                              return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">P</span>;
+                              const grade = getGradeAttributes(item.score, item.fullMark);
+                              if (grade) {
+                                  return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold border ${grade.color}`}>{grade.label}</span>;
+                              }
+                              return <span className="text-gray-300">-</span>;
                             })()
                           )}
                         </td>
@@ -201,7 +242,7 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                 </table>
               </div>
               <div className="p-3 bg-gray-50 dark:bg-gray-900/30 border-t border-gray-100 dark:border-gray-700 text-[10px] text-gray-400 text-center">
-                * 满分值基于通用标准估算，仅供参考
+                * 满分值基于通用标准估算，仅供参考; 评级标准: A+≥95%, A≥90%, B≥75%, C≥60%
               </div>
             </div>
           </div>
