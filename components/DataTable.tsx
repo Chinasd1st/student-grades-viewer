@@ -2,45 +2,50 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Sheet } from '../types';
 import { exportToCSV } from '../utils/exportUtils';
 import StudentDetailModal from './StudentDetailModal';
-import { getGradeAttributes, getFullMark } from '../utils/statsUtils';
+import { getGradeFromPercentile, getNumericColumns, getScoreRankStats } from '../utils/statsUtils';
 
 interface DataTableProps {
   data: Sheet;
+  sheetName?: string; // Add sheetName prop to detect context
 }
 
 type SortDirection = 'asc' | 'desc' | null;
 
 interface SortConfig {
-  key: number; // Column Index relative to ORIGINAL data
+  key: number;
   direction: SortDirection;
+}
+
+// Definition for grouped headers
+interface ColumnGroup {
+  name: string; // The main label (e.g. "语文")
+  columns: {
+    originalIndex: number;
+    subName: string; // The sub label (e.g. "得分", "排名", "校次")
+    isRank: boolean;
+  }[];
 }
 
 const ITEMS_PER_PAGE = 50;
 
-const DataTable: React.FC<DataTableProps> = ({ data }) => {
-  // State for Reordering
-  const [columnOrder, setColumnOrder] = useState<number[]>([]);
+const DataTable: React.FC<DataTableProps> = ({ data, sheetName = '' }) => {
+  // Detect if this is a "History" / "Aggregate" sheet based on name convention
+  const isHistoryView = useMemo(() => sheetName.includes('历次'), [sheetName]);
 
-  // State for Sorting & Filtering
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
   const [sortConfig, setSortConfig] = useState<SortConfig>({ key: -1, direction: null });
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClass, setSelectedClass] = useState('all');
-  
-  // State for UI Config
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [isCompact, setIsCompact] = useState(false);
-  const [detailModalData, setDetailModalData] = useState<{columns: string[], row: any[]} | null>(null);
-
+  const [isCompact, setIsCompact] = useState(isHistoryView); // Default to compact for history
+  const [detailModalData, setDetailModalData] = useState<{columns: string[], row: any[], sheet: Sheet} | null>(null);
+  
   // Freezing State
-  const [frozenColCount, setFrozenColCount] = useState(1); // Default freeze first column
-  const [frozenRowCount, setFrozenRowCount] = useState(1); // 1 = Header only, 0 = None
+  const [frozenColCount, setFrozenColCount] = useState(1); 
+  const [frozenRowCount, setFrozenRowCount] = useState(1); 
 
-  // Drag & Drop State
-  const [draggingColIndex, setDraggingColIndex] = useState<number | null>(null);
-
-  // Ref to measure column widths for sticky calculation
   const tableRef = useRef<HTMLTableElement>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
 
@@ -60,7 +65,6 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
            setColumnWidths(widths);
        }
     };
-    // Measure initially and after a short timeout for layout settle
     measure();
     const timer = setTimeout(measure, 100);
     window.addEventListener('resize', measure);
@@ -70,23 +74,105 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
     };
   }, [data, columnOrder, hiddenColumns, isCompact]);
 
-  // --- 0. Helpers ---
-  const isExcludedColumn = (colName: string) => /排名|Rank|号|ID|次|班级|Class|姓名|Name/.test(colName);
-  const isCompositeColumn = (colName: string) => /\+|语数英|总分|Total|Sum/.test(colName);
+  // --- 1. Smart Header Grouping Logic ---
+  const columnGroups = useMemo(() => {
+    const groups: ColumnGroup[] = [];
+    const processed = new Set<number>();
+    
+    // Use the visual column order
+    const visibleIndices = columnOrder.filter(idx => !hiddenColumns.has(idx));
 
-  // --- 1. Class List ---
-  const classColIndex = useMemo(() => data.columns.findIndex(c => c === '班级' || c === 'Class'), [data.columns]);
-  const classes = useMemo(() => {
-    if (classColIndex === -1) return [];
-    const clsSet = new Set<string>();
-    data.rows.forEach(r => {
-      const val = r[classColIndex];
-      if (val !== null && val !== undefined) clsSet.add(String(val));
+    for (let i = 0; i < visibleIndices.length; i++) {
+        const originalIndex = visibleIndices[i];
+        if (processed.has(originalIndex)) continue;
+
+        const colName = data.columns[originalIndex];
+        
+        // Metadata Columns: Exclude from "Subject" grouping blocks
+        // Explicitly include "信息" (Info) and "通用" (General) here to prevent them being treated as score blocks or merged incorrectly
+        if (/准考证|号|ID|姓名|Name|班级|Class|班主任|联系领导|信息|通用/.test(colName)) {
+            groups.push({
+                name: colName,
+                columns: [{ originalIndex: originalIndex, subName: '', isRank: false }]
+            });
+            processed.add(originalIndex);
+            continue;
+        }
+
+        // Start a new potential subject group (e.g., "12月总分", "12月技术")
+        const group: ColumnGroup = {
+            name: colName,
+            columns: [{ originalIndex: originalIndex, subName: '得分', isRank: false }]
+        };
+        processed.add(originalIndex);
+
+        // Look ahead for associated metric columns in the *visible* order
+        // We only group implicit ranks ("排名", "校次") or explicit sub-ranks
+        let nextVisualIdx = i + 1;
+        while (nextVisualIdx < visibleIndices.length) {
+            const nextOriginalIdx = visibleIndices[nextVisualIdx];
+            const nextColName = data.columns[nextOriginalIdx];
+            
+            const isImplicitRank = ['排名', '校次', '班次', 'Rank'].includes(nextColName);
+            const isExplicitRank = nextColName.includes(colName) && /次|Rank|排名/.test(nextColName);
+
+            if (isImplicitRank || isExplicitRank) {
+                let subName = nextColName;
+                if (isExplicitRank) {
+                    subName = nextColName.replace(colName, '').replace('+', '').trim();
+                }
+                
+                group.columns.push({
+                    originalIndex: nextOriginalIdx,
+                    subName: subName,
+                    isRank: true
+                });
+                processed.add(nextOriginalIdx);
+                nextVisualIdx++;
+            } else {
+                break; // Stop grouping if next column is a new subject (e.g., "12月技术" after "通用")
+            }
+        }
+        groups.push(group);
+    }
+
+    return groups;
+  }, [data.columns, hiddenColumns, columnOrder]);
+
+  // --- 2. Data Caching ---
+  const columnValuesCache = useMemo(() => {
+    // Exclude summary rows from stats
+    const classIdx = data.columns.findIndex(c => c === '班级' || c === 'Class');
+    
+    const validRowsForStats = data.rows.filter(row => {
+        if (classIdx === -1) return true;
+        const clsVal = String(row[classIdx] || '');
+        return !clsVal.includes('平均') && clsVal.length < 10;
     });
-    return Array.from(clsSet).sort();
+
+    const tempSheet = { ...data, rows: validRowsForStats };
+    const numericCols = getNumericColumns(tempSheet);
+    
+    const cache = new Map<number, number[]>();
+    numericCols.forEach(col => {
+      cache.set(col.index, [...col.values].sort((a, b) => b - a));
+    });
+    return cache;
+  }, [data]);
+
+  // --- 3. Filtering & Sorting ---
+  const classColIndex = useMemo(() => data.columns.findIndex(c => c === '班级' || c === 'Class'), [data.columns]);
+  
+  const classes = useMemo(() => {
+      if (classColIndex === -1) return [];
+      const s = new Set<string>();
+      data.rows.forEach(r => {
+          const val = String(r[classColIndex] || '');
+          if (val && !val.includes('平均')) s.add(val);
+      });
+      return Array.from(s).sort();
   }, [data.rows, classColIndex]);
 
-  // --- 2. Filtering ---
   const filteredRows = useMemo(() => {
     let res = data.rows;
     if (selectedClass !== 'all' && classColIndex !== -1) {
@@ -94,22 +180,19 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
     }
     if (searchTerm) {
       const lowerTerm = searchTerm.toLowerCase();
-      res = res.filter(row => 
-        row.some(cell => String(cell).toLowerCase().includes(lowerTerm))
-      );
+      res = res.filter(row => row.some(cell => String(cell).toLowerCase().includes(lowerTerm)));
     }
     return res;
   }, [data.rows, searchTerm, selectedClass, classColIndex]);
 
-  // --- 3. Sorting ---
   const sortedRows = useMemo(() => {
     if (sortConfig.direction === null || sortConfig.key === -1) return filteredRows;
-
     return [...filteredRows].sort((a, b) => {
       const aVal = a[sortConfig.key];
       const bVal = b[sortConfig.key];
-      if (aVal === null) return 1;
-      if (bVal === null) return -1;
+      if (aVal === null || aVal === undefined) return 1;
+      if (bVal === null || bVal === undefined) return -1;
+      
       if (typeof aVal === 'number' && typeof bVal === 'number') {
         return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
       }
@@ -119,81 +202,28 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
     });
   }, [filteredRows, sortConfig]);
 
-  // --- 4. Pagination ---
-  const totalPages = Math.ceil(sortedRows.length / ITEMS_PER_PAGE);
   const paginatedRows = useMemo(() => {
     const start = (currentPage - 1) * ITEMS_PER_PAGE;
     return sortedRows.slice(start, start + ITEMS_PER_PAGE);
   }, [sortedRows, currentPage]);
 
-  // --- 5. Stats ---
-  const summaryStats = useMemo(() => {
-    const stats: { [key: number]: { avg: number; max: number; min: number; passRate: number | null } | null } = {};
-    
-    data.columns.forEach((colName, idx) => {
-      if (hiddenColumns.has(idx) || isExcludedColumn(colName)) return;
-      let sum = 0, count = 0, max = -Infinity, min = Infinity, passCount = 0;
-      let isNumeric = true;
-      const isComposite = isCompositeColumn(colName);
-      const isMainSubject = /语文|数学|英语|English|Chinese|Math/.test(colName) && !isComposite;
-      const passScore = isMainSubject ? 90 : 60; 
-
-      for (const row of filteredRows) { 
-        const val = row[idx];
-        if (typeof val === 'number') {
-          sum += val;
-          count++;
-          if (val > max) max = val;
-          if (val < min) min = val;
-          if (!isComposite && val >= passScore) passCount++;
-        } else if (val !== null && val !== undefined && val !== '') {
-           isNumeric = false;
-           break;
-        }
-      }
-
-      if (isNumeric && count > 0) {
-        stats[idx] = { 
-          avg: sum / count, 
-          max: max,
-          min: min,
-          passRate: isComposite ? null : (passCount / count) * 100
-        };
-      } else {
-        stats[idx] = null;
-      }
-    });
-    return stats;
-  }, [data.columns, filteredRows, hiddenColumns]);
-
-  // --- Drag & Drop Handlers ---
-  const handleDragStart = (e: React.DragEvent, index: number) => {
-    setDraggingColIndex(index); // Index within columnOrder array
-    e.dataTransfer.effectAllowed = "move";
-    // Set a transparent ghost image if possible, or just let default happen
+  // --- 4. Render Helpers ---
+  const handleSort = (idx: number) => {
+    let direction: SortDirection = 'asc';
+    if (sortConfig.key === idx && sortConfig.direction === 'asc') direction = 'desc';
+    else if (sortConfig.key === idx && sortConfig.direction === 'desc') direction = null;
+    setSortConfig({ key: idx, direction });
   };
 
-  const handleDragOver = (e: React.DragEvent, index: number) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
+  const toggleColumn = (idx: number) => {
+    const newHidden = new Set(hiddenColumns);
+    if (newHidden.has(idx)) newHidden.delete(idx);
+    else newHidden.add(idx);
+    setHiddenColumns(newHidden);
   };
 
-  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
-    e.preventDefault();
-    if (draggingColIndex === null || draggingColIndex === targetIndex) return;
-
-    const newOrder = [...columnOrder];
-    const item = newOrder.splice(draggingColIndex, 1)[0];
-    newOrder.splice(targetIndex, 0, item);
-    
-    setColumnOrder(newOrder);
-    setDraggingColIndex(null);
-  };
-
-  // --- Column Styling & Sticky Logic ---
   const getStickyStyle = (visualIndex: number) => {
     if (visualIndex < frozenColCount && columnWidths.length > 0) {
-        // Calculate accumulated left position
         const left = columnWidths.slice(0, visualIndex).reduce((a, b) => a + b, 0);
         return { 
             position: 'sticky' as const, 
@@ -204,332 +234,273 @@ const DataTable: React.FC<DataTableProps> = ({ data }) => {
     return {};
   };
 
-  // --- Render Helpers ---
-  const handleSort = (originalIndex: number) => {
-    let direction: SortDirection = 'asc';
-    if (sortConfig.key === originalIndex && sortConfig.direction === 'asc') direction = 'desc';
-    else if (sortConfig.key === originalIndex && sortConfig.direction === 'desc') direction = null;
-    setSortConfig({ key: originalIndex, direction });
-  };
-
-  const toggleColumn = (idx: number) => {
-    const newHidden = new Set(hiddenColumns);
-    if (newHidden.has(idx)) newHidden.delete(idx);
-    else newHidden.add(idx);
-    setHiddenColumns(newHidden);
-  };
-
-  const handleExport = () => {
-    // Use columnOrder to export in current visual order
-    const visibleVisualIndices = columnOrder.map((_, i) => i).filter(i => !hiddenColumns.has(columnOrder[i]));
-    const visibleCols = visibleVisualIndices.map(i => data.columns[columnOrder[i]]);
-    const visibleRows = sortedRows.map(row => visibleVisualIndices.map(i => row[columnOrder[i]]));
-    exportToCSV('学生成绩表', visibleCols, visibleRows);
-  };
-
-  const getCellClass = (val: any, colName: string) => {
-    if (typeof val !== 'number') return 'text-left text-gray-700 dark:text-gray-300';
+  const getCellClass = (val: any, colIdx: number, isRank: boolean) => {
+    if (val === null || val === undefined || val === '') return 'text-center text-gray-300';
+    
+    // String content (Names, Info, General teachers)
+    if (typeof val !== 'number') return 'text-left text-gray-700 dark:text-gray-300 font-medium whitespace-nowrap';
+    
     let baseClass = 'font-mono text-right ';
     
-    if (isExcludedColumn(colName)) return baseClass + 'text-gray-600 dark:text-gray-400';
+    // Rank columns styling
+    if (isRank) return baseClass + 'text-gray-400 dark:text-gray-500 italic text-xs';
 
-    if (isCompositeColumn(colName)) {
-        if (/总分|Total/.test(colName)) return baseClass + 'font-extrabold text-indigo-700 dark:text-indigo-400 text-base';
-        return baseClass + 'font-bold text-blue-600 dark:text-blue-400';
-    }
-
-    // Use refined grading coloring with NO background for table alignment
-    const fullMark = getFullMark(colName);
-    const gradeAttr = getGradeAttributes(val, fullMark);
-    
-    if (gradeAttr) {
-        // Map labels to strict text colors
-        switch (gradeAttr.label) {
-            case 'A+': return baseClass + 'text-emerald-700 dark:text-emerald-400 font-extrabold';
-            case 'A':  return baseClass + 'text-green-600 dark:text-green-400 font-bold';
-            case 'A-': return baseClass + 'text-lime-600 dark:text-lime-400 font-semibold';
-            case 'B+': return baseClass + 'text-blue-600 dark:text-blue-400 font-medium';
-            case 'B':  return baseClass + 'text-sky-600 dark:text-sky-400';
-            case 'B-': return baseClass + 'text-cyan-600 dark:text-cyan-400';
-            case 'C':  return baseClass + 'text-yellow-600 dark:text-yellow-500';
-            case 'D':  return baseClass + 'text-red-600 dark:text-red-400 font-bold';
-            default:   return baseClass + 'text-gray-700 dark:text-gray-300';
+    // Score coloring
+    const sortedValues = columnValuesCache.get(colIdx);
+    if (sortedValues) {
+        const { percentile } = getScoreRankStats(val, sortedValues);
+        const gradeAttr = getGradeFromPercentile(percentile);
+        
+        if (gradeAttr) {
+            // Apply full color grading even for history views to maintain consistency
+            switch (gradeAttr.label) {
+                case 'A+': return baseClass + 'text-emerald-700 dark:text-emerald-400 font-extrabold';
+                case 'A':  return baseClass + 'text-green-600 dark:text-green-400 font-bold';
+                case 'A-': return baseClass + 'text-lime-600 dark:text-lime-400 font-semibold';
+                case 'B+': return baseClass + 'text-blue-600 dark:text-blue-400 font-medium';
+                case 'B':  return baseClass + 'text-sky-600 dark:text-sky-400';
+                case 'B-': return baseClass + 'text-cyan-600 dark:text-cyan-400';
+                case 'C':  return baseClass + 'text-yellow-600 dark:text-yellow-500';
+                case 'D':  return baseClass + 'text-red-600 dark:text-red-400 font-bold';
+                default:   return baseClass + 'text-gray-700 dark:text-gray-300';
+            }
         }
     }
-
     return baseClass + 'text-gray-700 dark:text-gray-300';
   };
 
-  const visibleColumnOrder = columnOrder.filter(idx => !hiddenColumns.has(idx));
+  const handleRowClick = (row: any[]) => {
+      // Disable modal for History summary sheets
+      if (isHistoryView) return; 
+      
+      const isSummaryRow = String(row[0]).includes('平均');
+      if (!isSummaryRow) {
+          setDetailModalData({ columns: data.columns, row, sheet: data });
+      }
+  };
+
+  // Helper for tracking visual index during rendering
+  let visualColIndexCounter = 0;
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden w-full">
-      
-      <StudentDetailModal 
-        isOpen={!!detailModalData} 
-        onClose={() => setDetailModalData(null)} 
-        data={detailModalData} 
-      />
+      <StudentDetailModal isOpen={!!detailModalData} onClose={() => setDetailModalData(null)} data={detailModalData} />
 
-      {/* --- 工具栏 --- */}
-      <div className="p-2 border-b border-gray-200 dark:border-gray-700 flex flex-wrap gap-2 justify-between items-center bg-gray-50/50 dark:bg-gray-800/50 text-sm">
-        
-        {/* Filter Section */}
-        <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center flex-1">
-            <div className="relative w-full sm:w-48 group">
-                <input
-                    type="text"
-                    placeholder="搜索..."
-                    value={searchTerm}
-                    onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
-                    className="w-full pl-8 pr-2 py-1.5 text-xs sm:text-sm border border-gray-300 dark:border-gray-600 rounded focus:ring-1 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                />
-                <svg className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-            </div>
+      {/* Toolbar */}
+      <div className={`p-2 border-b border-gray-200 dark:border-gray-700 flex flex-wrap gap-2 justify-between items-center text-sm
+        ${isHistoryView ? 'bg-amber-50/50 dark:bg-amber-900/10' : 'bg-gray-50/50 dark:bg-gray-800/50'}
+      `}>
+         <div className="flex gap-2 items-center flex-1">
+            <input type="text" placeholder="搜索..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm w-32 sm:w-48 text-gray-900 dark:text-white" />
             
             {classes.length > 0 && (
-                <div className="relative w-full sm:w-32">
-                    <select
-                        value={selectedClass}
-                        onChange={(e) => { setSelectedClass(e.target.value); setCurrentPage(1); }}
-                        className="w-full pl-2 pr-6 py-1.5 text-xs sm:text-sm border border-gray-300 dark:border-gray-600 rounded focus:ring-1 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-white appearance-none cursor-pointer"
-                    >
-                        <option value="all">全部班级</option>
-                        {classes.map(cls => (
-                            <option key={cls} value={cls}>{cls}</option>
-                        ))}
-                    </select>
-                </div>
+                <select value={selectedClass} onChange={e => setSelectedClass(e.target.value)} className="px-2 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-white cursor-pointer">
+                    <option value="all">全部班级</option>
+                    {classes.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
             )}
-        </div>
+            
+            {isHistoryView && (
+                <span className="text-xs px-2 py-1 bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400 rounded-md font-medium border border-amber-200 dark:border-amber-800">
+                    历史统计概览
+                </span>
+            )}
+         </div>
+         
+         <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap shrink-0">
+            {/* Freeze Controls */}
+            <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 p-1 rounded hidden sm:flex">
+                <span className="text-xs text-gray-500 dark:text-gray-400 px-1">冻结:</span>
+                <input 
+                    type="number" 
+                    min="0" 
+                    max="5"
+                    value={frozenColCount}
+                    onChange={(e) => setFrozenColCount(Math.min(5, Math.max(0, parseInt(e.target.value) || 0)))}
+                    className="w-10 p-0.5 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
+                />
+            </div>
 
-        {/* View Settings Section */}
-        <div className="flex gap-2 items-center flex-wrap sm:flex-nowrap shrink-0 ml-auto">
-          {/* Freeze Controls */}
-          <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 p-1 rounded">
-             <span className="text-xs text-gray-500 dark:text-gray-400 px-1">冻结列:</span>
-             <input 
-                type="number" 
-                min="0" 
-                max="5"
-                value={frozenColCount}
-                onChange={(e) => setFrozenColCount(Math.min(5, Math.max(0, parseInt(e.target.value) || 0)))}
-                className="w-10 p-0.5 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800"
-             />
-          </div>
-          <div className="flex items-center gap-1 bg-gray-100 dark:bg-gray-700 p-1 rounded">
-             <label className="flex items-center gap-1 cursor-pointer">
-                 <input 
-                    type="checkbox" 
-                    checked={frozenRowCount > 0} 
-                    onChange={(e) => setFrozenRowCount(e.target.checked ? 1 : 0)}
-                    className="rounded text-blue-600 focus:ring-0 w-3 h-3"
-                 />
-                 <span className="text-xs text-gray-500 dark:text-gray-400">冻结表头</span>
-             </label>
-          </div>
+            <div className="relative">
+              <button
+                onClick={() => setShowColumnMenu(!showColumnMenu)}
+                className="px-3 py-1.5 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 flex items-center gap-1 shadow-sm whitespace-nowrap"
+              >
+                <span>显示列</span>
+                <span className="bg-gray-100 dark:bg-gray-600 px-1 rounded text-[10px]">{data.columns.length - hiddenColumns.size}</span>
+              </button>
+              {showColumnMenu && (
+                <div className="absolute right-0 mt-2 w-64 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 z-50 flex flex-col overflow-hidden max-h-[300px] overflow-y-auto">
+                   <div className="p-2">
+                     {data.columns.map((col, idx) => (
+                      <label key={idx} className="flex items-center px-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-700 rounded cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!hiddenColumns.has(idx)}
+                          onChange={() => toggleColumn(idx)}
+                          className="rounded border-gray-300 text-blue-600 mr-2"
+                        />
+                        <span className="text-xs text-gray-700 dark:text-gray-200 truncate">{col}</span>
+                      </label>
+                    ))}
+                   </div>
+                   <div className="fixed inset-0 z-[-1]" onClick={() => setShowColumnMenu(false)}></div>
+                </div>
+              )}
+            </div>
 
-          <button 
-             onClick={() => setIsCompact(!isCompact)}
-             title={isCompact ? "舒适视图" : "紧凑视图"}
-             className="p-1.5 text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-600 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700"
-          >
-             {isCompact ? (
-               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" /></svg>
-             ) : (
-               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-             )}
-          </button>
-
-          <div className="relative">
-            <button
-              onClick={() => setShowColumnMenu(!showColumnMenu)}
-              className="px-3 py-1.5 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 flex items-center gap-1 shadow-sm whitespace-nowrap"
-            >
-              <span>显示列</span>
-              <span className="bg-gray-100 dark:bg-gray-600 px-1 rounded text-[10px]">
-                {data.columns.length - hiddenColumns.size}
-              </span>
+            <button onClick={() => exportToCSV(isHistoryView ? '历史成绩统计' : '成绩表', data.columns, sortedRows)} className="px-3 py-1.5 bg-green-600 text-white rounded hover:bg-green-700 text-sm whitespace-nowrap shadow-sm transition-colors">导出</button>
+            <button onClick={() => setIsCompact(!isCompact)} className="p-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors">
+               {isCompact ? "舒适" : "紧凑"}
             </button>
-            {showColumnMenu && (
-              <div className="absolute right-0 mt-2 w-64 bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-700 z-50 flex flex-col overflow-hidden animate-[fadeIn_0.1s_ease-out]">
-                <div className="max-h-[300px] overflow-y-auto p-2 scrollbar-thin">
-                   {data.columns.map((col, idx) => (
-                    <label key={idx} className="flex items-center px-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-700 rounded cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={!hiddenColumns.has(idx)}
-                        onChange={() => toggleColumn(idx)}
-                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 mr-2 h-3.5 w-3.5"
-                      />
-                      <span className="text-xs text-gray-700 dark:text-gray-200 truncate">{col}</span>
-                    </label>
-                  ))}
-                </div>
-                <div className="fixed inset-0 z-[-1]" onClick={() => setShowColumnMenu(false)}></div>
-              </div>
-            )}
-          </div>
-
-          <button
-            onClick={handleExport}
-            className="px-3 py-1.5 text-xs sm:text-sm font-medium text-white bg-green-600 rounded hover:bg-green-700 flex items-center gap-1 shadow-sm whitespace-nowrap"
-          >
-            <span>导出</span>
-          </button>
-        </div>
+         </div>
       </div>
 
-      {/* --- 表格主体 --- */}
-      <div className="flex-1 overflow-auto w-full relative scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-600">
+      {/* Main Table */}
+      <div className="flex-1 overflow-auto w-full scrollbar-thin scrollbar-thumb-gray-300 dark:scrollbar-thumb-gray-600">
         <table ref={tableRef} className="w-full border-separate border-spacing-0 text-sm">
-          <thead className={`${frozenRowCount > 0 ? 'sticky top-0 z-[25]' : ''} bg-gray-50 dark:bg-gray-800 shadow-sm`}>
+          <thead className={`sticky top-0 z-30 shadow-sm ${isHistoryView ? 'bg-amber-50 dark:bg-gray-900' : 'bg-gray-100 dark:bg-gray-900'}`}>
+            {/* Level 1: Subject Groups */}
             <tr>
-              {visibleColumnOrder.map((originalIdx, visualIdx) => {
-                const colName = data.columns[originalIdx];
-                const minWidth = colName.length > 4 ? 'min-w-[100px]' : 'min-w-[80px]';
-                const stickyStyle = getStickyStyle(visualIdx);
-                const isSticky = !!stickyStyle.position;
+              {columnGroups.map((group, gIdx) => {
+                const colSpan = group.columns.length;
+                // Calculate sticky positioning for the group if needed
+                const firstColVisualIndex = visualColIndexCounter; 
+                const stickyStyle = getStickyStyle(firstColVisualIndex);
+                visualColIndexCounter += colSpan;
 
                 return (
                   <th
-                    key={originalIdx}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, visualIdx)}
-                    onDragOver={(e) => handleDragOver(e, visualIdx)}
-                    onDrop={(e) => handleDrop(e, visualIdx)}
-                    onClick={() => handleSort(originalIdx)}
+                    key={`g-${gIdx}`}
+                    colSpan={colSpan}
                     className={`
-                      ${isCompact ? 'px-2 py-1.5 text-xs' : 'px-4 py-3'}
-                      font-semibold text-gray-700 dark:text-gray-200 border-b border-gray-200 dark:border-gray-700 
-                      whitespace-nowrap cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors select-none group text-left
-                      ${minWidth}
-                      ${isSticky ? 'bg-gray-50 dark:bg-gray-800 border-r border-gray-200 dark:border-gray-600 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]' : ''}
-                      ${draggingColIndex === visualIdx ? 'opacity-50 border-dashed border-2 border-blue-400' : ''}
+                      px-2 py-1.5 text-center font-bold text-gray-700 dark:text-gray-200 border-b border-r border-gray-200 dark:border-gray-700
+                      ${isHistoryView 
+                          ? (gIdx % 2 === 0 ? 'bg-amber-50 dark:bg-gray-900' : 'bg-orange-100/50 dark:bg-orange-900/20') 
+                          : (gIdx % 2 === 0 ? 'bg-gray-100 dark:bg-gray-900' : 'bg-blue-50/40 dark:bg-blue-900/20')
+                      }
                     `}
-                    style={stickyStyle}
+                    style={stickyStyle.position ? { ...stickyStyle, zIndex: 25 } : {}}
                   >
-                    <div className="flex items-center gap-1 justify-between">
-                      <span className="truncate cursor-move" title={colName}>{colName}</span>
-                      <span className="text-gray-400 w-4 flex justify-center flex-shrink-0">
-                        {sortConfig.key === originalIdx ? (
-                          <span className="text-blue-500 font-bold">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
-                        ) : (
-                          <span className="opacity-0 group-hover:opacity-50 text-xs transition-opacity">⇅</span>
-                        )}
-                      </span>
-                    </div>
+                    {group.name}
                   </th>
                 );
               })}
             </tr>
+            {/* Level 2: Specific Metrics */}
+            <tr className="bg-gray-50 dark:bg-gray-800">
+              {(() => {
+                  let subVisualIndex = 0;
+                  return columnGroups.map((group, gIdx) => (
+                    group.columns.map((col) => {
+                      const stickyStyle = getStickyStyle(subVisualIndex);
+                      subVisualIndex++;
+                      
+                      return (
+                        <th
+                            key={`c-${col.originalIndex}`}
+                            onClick={() => handleSort(col.originalIndex)}
+                            className={`
+                            ${isCompact ? 'px-1 py-1 text-[10px]' : 'px-3 py-2 text-xs'}
+                            cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 border-b border-r border-gray-200 dark:border-gray-700 text-gray-500 whitespace-nowrap font-semibold
+                            ${isHistoryView 
+                                ? (gIdx % 2 === 0 ? 'bg-white dark:bg-gray-800' : 'bg-orange-50/30 dark:bg-orange-900/10')
+                                : (gIdx % 2 === 0 ? 'bg-white dark:bg-gray-800' : 'bg-blue-50/20 dark:bg-blue-900/10')
+                            }
+                            `}
+                            style={stickyStyle}
+                        >
+                            <div className="flex items-center justify-center gap-1">
+                            <span>{col.subName || group.name}</span>
+                            {sortConfig.key === col.originalIndex && (
+                                <span className="text-blue-500 font-bold">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
+                            )}
+                            </div>
+                        </th>
+                      );
+                    })
+                  ));
+              })()}
+            </tr>
           </thead>
+          
           <tbody className="bg-white dark:bg-gray-900">
-            {paginatedRows.map((row, rowIdx) => (
-              <tr 
-                key={rowIdx} 
-                onClick={() => setDetailModalData({ columns: data.columns, row })}
-                className="hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors duration-75 group cursor-pointer"
-              >
-                {visibleColumnOrder.map((originalIdx, visualIdx) => {
-                  const cell = row[originalIdx];
-                  const colName = data.columns[originalIdx];
-                  const stickyStyle = getStickyStyle(visualIdx);
-                  const isSticky = !!stickyStyle.position;
+            {paginatedRows.map((row, rowIdx) => {
+              const prevRow = paginatedRows[rowIdx - 1];
+              const showClassDivider = prevRow && classColIndex !== -1 && row[classColIndex] !== prevRow[classColIndex];
+              const isSummaryRow = String(row[0]).includes('平均');
 
-                  return (
-                    <td
-                      key={originalIdx}
-                      className={`
-                        ${isCompact ? 'px-2 py-1' : 'px-4 py-3'}
-                        whitespace-nowrap border-b border-gray-100 dark:border-gray-800
-                        ${getCellClass(cell, colName)}
-                        ${isSticky ? 'bg-white dark:bg-gray-900 group-hover:bg-blue-50/50 dark:group-hover:bg-blue-900/10 border-r border-gray-200 dark:border-gray-700 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]' : ''}
-                      `}
-                      style={{ ...stickyStyle, zIndex: isSticky ? 10 : 'auto' }}
-                    >
-                      {cell === null || cell === undefined ? <span className="text-gray-300">-</span> : cell}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+              return (
+                <React.Fragment key={rowIdx}>
+                  {showClassDivider && (
+                    <tr className="bg-gray-100 dark:bg-gray-800">
+                      <td colSpan={data.columns.length} className="h-2 border-y border-gray-200 dark:border-gray-700"></td>
+                    </tr>
+                  )}
+                  <tr 
+                    onClick={() => handleRowClick(row)}
+                    className={`
+                        transition-colors group border-b border-gray-50 dark:border-gray-800
+                        ${isSummaryRow 
+                            ? 'bg-yellow-50 dark:bg-yellow-900/20 font-bold hover:bg-yellow-100 dark:hover:bg-yellow-900/30' 
+                            : isHistoryView 
+                                ? 'hover:bg-amber-50/50 dark:hover:bg-amber-900/10' // No cursor-pointer for history to imply no click
+                                : 'hover:bg-blue-50/50 dark:hover:bg-blue-900/20 cursor-pointer'
+                        }
+                    `}
+                  >
+                    {(() => {
+                        let cellVisualIndex = 0;
+                        return columnGroups.map((group, gIdx) => (
+                            group.columns.map((col) => {
+                                const cell = row[col.originalIndex];
+                                const stickyStyle = getStickyStyle(cellVisualIndex);
+                                const isSticky = !!stickyStyle.position;
+                                cellVisualIndex++;
+
+                                return (
+                                <td
+                                    key={col.originalIndex}
+                                    className={`
+                                    ${isCompact ? 'px-1 py-1' : 'px-3 py-2.5'}
+                                    border-r border-gray-100 dark:border-gray-800 whitespace-nowrap
+                                    ${getCellClass(cell, col.originalIndex, col.isRank)}
+                                    ${isHistoryView 
+                                        ? (gIdx % 2 === 0 ? '' : 'bg-orange-50/10 dark:bg-orange-900/5')
+                                        : (gIdx % 2 === 0 ? '' : 'bg-blue-50/5 dark:bg-blue-900/5')
+                                    }
+                                    ${isSticky && !isSummaryRow ? 'bg-white dark:bg-gray-900' : ''}
+                                    ${isSticky ? 'border-r-2 border-gray-200 dark:border-gray-600 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]' : ''}
+                                    `}
+                                    style={isSticky ? { ...stickyStyle, zIndex: 10 } : {}}
+                                >
+                                    {cell === null || cell === undefined || cell === '' ? <span className="text-gray-200">-</span> : cell}
+                                </td>
+                                );
+                            })
+                        ));
+                    })()}
+                  </tr>
+                </React.Fragment>
+              );
+            })}
             {paginatedRows.length === 0 && (
-              <tr>
-                <td colSpan={visibleColumnOrder.length} className="p-16 text-center text-gray-500">
-                  <div className="flex flex-col items-center gap-3">
-                    <svg className="w-8 h-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
-                    <span>未找到匹配的数据</span>
-                  </div>
-                </td>
-              </tr>
+                <tr>
+                    <td colSpan={data.columns.length} className="p-8 text-center text-gray-400">无数据</td>
+                </tr>
             )}
           </tbody>
-          
-          {paginatedRows.length > 0 && (
-             <tfoot className="sticky bottom-0 z-30 bg-gray-50 dark:bg-gray-800 shadow-[0_-4px_10px_-2px_rgba(0,0,0,0.05)] border-t border-gray-300 dark:border-gray-600">
-                <tr>
-                  {visibleColumnOrder.map((originalIdx, visualIdx) => {
-                     const stat = summaryStats[originalIdx];
-                     const stickyStyle = getStickyStyle(visualIdx);
-                     const isSticky = !!stickyStyle.position;
-
-                     return (
-                       <td 
-                        key={originalIdx} 
-                        className={`
-                          ${isCompact ? 'px-2 py-1' : 'px-4 py-2'}
-                          whitespace-nowrap text-xs bg-gray-100 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-600
-                          ${isSticky ? 'border-r border-gray-200 dark:border-gray-600 font-bold text-gray-600 dark:text-gray-300 z-40' : ''}
-                        `}
-                        style={stickyStyle}
-                       >
-                          {stat ? (
-                             <div className="flex flex-col items-end gap-0.5 leading-tight">
-                               <span title="平均分" className="text-blue-600 dark:text-blue-400 font-bold">Avg: {stat.avg.toFixed(1)}</span>
-                               {!isCompact && (
-                                   <div className="flex gap-2 text-[10px] text-gray-500 dark:text-gray-400">
-                                      <span title="最高分">Max: {stat.max}</span>
-                                      {stat.passRate !== null && <span title="及格率" className={stat.passRate < 60 ? 'text-red-500' : ''}>及: {stat.passRate.toFixed(0)}%</span>}
-                                   </div>
-                               )}
-                             </div>
-                          ) : (
-                             visualIdx === 0 ? "本页统计:" : "-"
-                          )}
-                       </td>
-                     );
-                  })}
-                </tr>
-             </tfoot>
-          )}
         </table>
       </div>
 
-      {/* --- 分页栏 --- */}
-      <div className="border-t border-gray-200 dark:border-gray-700 p-2 bg-white dark:bg-gray-800 flex justify-between items-center text-xs sm:text-sm">
-        <span className="text-gray-500 dark:text-gray-400 pl-2">
-          {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, sortedRows.length)} / {sortedRows.length}
-        </span>
-        <div className="flex gap-2">
-          <button
-            disabled={currentPage === 1}
-            onClick={() => setCurrentPage(p => p - 1)}
-            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800"
-          >
-            上一页
-          </button>
-          <div className="px-2 py-1 bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded text-gray-700 dark:text-gray-200 font-medium">
-            {currentPage} / {totalPages || 1}
+      {/* Footer / Pagination */}
+      <div className="p-3 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 flex justify-between items-center text-xs text-gray-500 dark:text-gray-400">
+          <span>共 {sortedRows.length} 条记录 {selectedClass !== 'all' ? `(当前班级: ${selectedClass})` : ''}</span>
+          <div className="flex gap-2 items-center">
+             <button disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)} className="px-2 py-1 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-gray-500">上一页</button>
+             <span className="font-mono font-medium text-gray-700 dark:text-gray-200">{currentPage} / {Math.ceil(sortedRows.length / ITEMS_PER_PAGE) || 1}</span>
+             <button disabled={paginatedRows.length < ITEMS_PER_PAGE} onClick={() => setCurrentPage(p => p + 1)} className="px-2 py-1 hover:text-blue-600 disabled:opacity-30 disabled:hover:text-gray-500">下一页</button>
           </div>
-          <button
-            disabled={currentPage === totalPages || totalPages === 0}
-            onClick={() => setCurrentPage(p => p + 1)}
-            className="px-2 py-1 rounded border border-gray-300 dark:border-gray-600 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800"
-          >
-            下一页
-          </button>
-        </div>
       </div>
     </div>
   );

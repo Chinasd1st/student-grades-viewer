@@ -3,30 +3,40 @@ import SheetSelector from './components/SheetSelector';
 import DataTable from './components/DataTable';
 import StatsDashboard from './components/StatsDashboard';
 import { AppData } from './types';
-// Ensure strictly relative path to avoid resolution errors
 import jsonData from './data.json';
+import historyJson from './history.json'; // Import the new file
+import { processHistoryData } from './utils/dataProcessor';
 
 type ViewMode = 'table' | 'stats';
 
 const App: React.FC = () => {
-  // Initialize state directly with imported data
-  const [data, setData] = useState<AppData | null>(jsonData as unknown as AppData);
+  // Initialize state merging both data sources
+  const [data, setData] = useState<AppData | null>(null);
   const [activeSheet, setActiveSheet] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('table');
   const [darkMode, setDarkMode] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Initialize active sheet if data is available
-    if (data && data.sheetNames && data.sheetNames.length > 0 && !activeSheet) {
-      setActiveSheet(data.sheetNames[0]);
+    try {
+      // Process and merge data
+      const processedData = processHistoryData(historyJson, jsonData as unknown as AppData);
+      setData(processedData);
+
+      // Initialize active sheet
+      if (processedData.sheetNames.length > 0) {
+        setActiveSheet(processedData.sheetNames[0]);
+      }
+    } catch (e) {
+      console.error("Failed to load data", e);
+      setError("数据加载失败");
     }
 
     // Check system preference for dark mode
     if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       setDarkMode(true);
     }
-  }, [data]); 
+  }, []); 
 
   useEffect(() => {
     if (darkMode) {
@@ -139,6 +149,7 @@ const App: React.FC = () => {
                    <DataTable 
                     key={activeSheet} 
                     data={data.sheets[activeSheet]} 
+                    sheetName={activeSheet}
                   />
                 </div>
               ) : (

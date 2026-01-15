@@ -61,29 +61,73 @@ export const getNumericColumns = (sheet: Sheet): NumericColumn[] => {
   return numericCols;
 };
 
-// Helper to guess full mark
+// Helper to guess full mark (Used only for pass stats now mostly)
 export const getFullMark = (colName: string): number => {
-    // Heuristic: "Total" usually > 150, Main subjects 150, others 100
-    if (/总分|Total/.test(colName)) return 0; // Ignore normalization for total usually, or handle separately
+    if (/总分|Total/.test(colName)) return 0;
     if (/语数英/.test(colName)) return 450;
     if (/语文|数学|英语|English|Chinese|Math/.test(colName)) return 150;
     return 100;
 };
 
-// Helper for Grade Classification
-// These colors are primarily for Badges (Modal view). Table view uses text-only styles.
-export const getGradeAttributes = (score: number, fullMark: number) => {
-  if (fullMark <= 0) return null;
-  const ratio = score / fullMark;
-  
-  if (ratio >= 0.95) return { label: 'A+', color: 'text-emerald-700 bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300 border-emerald-200' };
-  if (ratio >= 0.90) return { label: 'A',  color: 'text-green-700 bg-green-100 dark:bg-green-900/40 dark:text-green-300 border-green-200' };
-  if (ratio >= 0.85) return { label: 'A-', color: 'text-lime-700 bg-lime-100 dark:bg-lime-900/40 dark:text-lime-300 border-lime-200' };
-  if (ratio >= 0.80) return { label: 'B+', color: 'text-blue-700 bg-blue-100 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200' };
-  if (ratio >= 0.75) return { label: 'B',  color: 'text-sky-700 bg-sky-100 dark:bg-sky-900/40 dark:text-sky-300 border-sky-200' };
-  if (ratio >= 0.70) return { label: 'B-', color: 'text-cyan-700 bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 border-cyan-200' };
-  if (ratio >= 0.60) return { label: 'C',  color: 'text-yellow-700 bg-yellow-100 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200' };
+/**
+ * Calculates the rank of a score within a dataset.
+ * Higher score = Rank 1.
+ * Returns { rank, total, percentile }
+ * Percentile is 0.0 to 1.0 (1.0 means top rank, 0.0 means bottom)
+ */
+export const getScoreRankStats = (score: number, sortedValues: number[]) => {
+    if (sortedValues.length === 0) return { rank: 0, total: 0, percentile: 0 };
+    
+    // Find first index where value <= score (since sorted descending)
+    // Actually simpler: standard rank is 1 + index in descending list
+    // Handling ties: The student gets the best rank (e.g. if 3 people tied for 1st, they are all 1st)
+    let rank = 1;
+    for (let i = 0; i < sortedValues.length; i++) {
+        if (score >= sortedValues[i]) {
+            rank = i + 1;
+            break;
+        }
+        // Fallback for lowest
+        if (i === sortedValues.length - 1) rank = sortedValues.length;
+    }
+
+    // Percentile Calculation:
+    // Top 1 (Rank 1) should be close to 100%. Last place should be close to 0%.
+    // Formula: (Total - Rank) / (Total - 1). If Total=1, return 1.
+    const total = sortedValues.length;
+    const percentile = total > 1 ? (total - rank) / (total - 1) : 1;
+
+    return { rank, total, percentile };
+};
+
+/**
+ * Get Grade Attributes based on RELATIVE RANKING (Percentile)
+ * percentile: 0.0 to 1.0 (1.0 is best)
+ */
+export const getGradeFromPercentile = (percentile: number) => {
+  // A+: Top 5%
+  if (percentile >= 0.95) return { label: 'A+', color: 'text-emerald-700 bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300 border-emerald-200' };
+  // A: Top 15% (Next 10%)
+  if (percentile >= 0.85) return { label: 'A',  color: 'text-green-700 bg-green-100 dark:bg-green-900/40 dark:text-green-300 border-green-200' };
+  // A-: Top 30% (Next 15%)
+  if (percentile >= 0.70) return { label: 'A-', color: 'text-lime-700 bg-lime-100 dark:bg-lime-900/40 dark:text-lime-300 border-lime-200' };
+  // B+: Top 50% (Next 20%)
+  if (percentile >= 0.50) return { label: 'B+', color: 'text-blue-700 bg-blue-100 dark:bg-blue-900/40 dark:text-blue-300 border-blue-200' };
+  // B: Top 70% (Next 20%)
+  if (percentile >= 0.30) return { label: 'B',  color: 'text-sky-700 bg-sky-100 dark:bg-sky-900/40 dark:text-sky-300 border-sky-200' };
+  // B-: Top 85% (Next 15%)
+  if (percentile >= 0.15) return { label: 'B-', color: 'text-cyan-700 bg-cyan-100 dark:bg-cyan-900/40 dark:text-cyan-300 border-cyan-200' };
+  // C: Top 95% (Next 10%)
+  if (percentile >= 0.05) return { label: 'C',  color: 'text-yellow-700 bg-yellow-100 dark:bg-yellow-900/40 dark:text-yellow-300 border-yellow-200' };
+  // D: Bottom 5%
   return { label: 'D', color: 'text-red-700 bg-red-100 dark:bg-red-900/40 dark:text-red-300 border-red-200' };
+};
+
+// Deprecated wrapper for backward compatibility if needed, but we prefer getGradeFromPercentile now
+export const getGradeAttributes = (score: number, fullMark: number) => {
+    // Fallback: Estimate percentile linearly if we don't have the full set
+    if (fullMark <= 0) return null;
+    return getGradeFromPercentile(score / fullMark);
 };
 
 // Calculate Pass/Excellence Stats

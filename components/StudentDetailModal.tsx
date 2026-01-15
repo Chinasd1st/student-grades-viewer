@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Tooltip } from 'recharts';
-import { getGradeAttributes } from '../utils/statsUtils';
+import { getGradeFromPercentile, getScoreRankStats, getNumericColumns } from '../utils/statsUtils';
+import { Sheet } from '../types';
 
 interface Props {
   isOpen: boolean;
@@ -8,13 +9,14 @@ interface Props {
   data: {
     columns: string[];
     row: (string | number | null)[];
+    sheet: Sheet;
   } | null;
 }
 
 const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
   if (!isOpen || !data) return null;
 
-  const { columns, row } = data;
+  const { columns, row, sheet } = data;
 
   // 1. 提取基础信息
   const nameIdx = columns.findIndex(c => /姓名|Name/i.test(c));
@@ -31,6 +33,16 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
   const totalScore = totalIdx !== -1 ? row[totalIdx] : null;
   const mainRank = mainRankIdx !== -1 ? row[mainRankIdx] : null;
 
+  // Cache column values for ranking logic (Memoized inside modal is fine for single student view)
+  const numericColumnsMap = useMemo(() => {
+      const map = new Map<number, number[]>();
+      const numericCols = getNumericColumns(sheet);
+      numericCols.forEach(col => {
+          map.set(col.index, [...col.values].sort((a, b) => b - a)); // Sort descending for ranking
+      });
+      return map;
+  }, [sheet]);
+
   // 2. 智能解析科目数据
   const subjectData = useMemo(() => {
     return columns.map((col, idx) => {
@@ -45,21 +57,33 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
       const isMainSubject = /语文|数学|英语|English|Chinese|Math/.test(col) && !/语数英/.test(col);
       const isComposite = /\+|语数英|总分|Total/.test(col); // 包含+号或特定组合名的视为组合科目
 
-      // 设定满分标准 (预估)
-      let fullMark = 100;
-      if (isMainSubject) fullMark = 150;
-      // 组合科目暂不设定统一满分用于雷达图（因为不画雷达图），但在列表中可能需要
+      // 计算排名和百分位
+      const sortedValues = numericColumnsMap.get(idx);
+      let rank = 0, total = 0, percentile = 0;
+      
+      if (sortedValues) {
+          const stats = getScoreRankStats(val, sortedValues);
+          rank = stats.rank;
+          total = stats.total;
+          percentile = stats.percentile;
+      }
+
+      // Radar Value: Percentile * 100 (High percentile = outer edge)
+      // If no data, 0.
+      const radarValue = percentile * 100;
 
       return {
         subject: col,
         score: val,
-        fullMark: fullMark,
+        rank,
+        totalStudents: total,
+        percentile,
         isMainSubject,
-        isComposite, // 标记是否为组合科目
-        normalized: isComposite ? 0 : (val / fullMark) * 100 // 组合科目不计算归一化分数用于雷达图
+        isComposite, 
+        radarValue 
       };
-    }).filter((item): item is { subject: string; score: number; fullMark: number; isMainSubject: boolean; isComposite: boolean; normalized: number } => item !== null);
-  }, [columns, row]);
+    }).filter((item): item is { subject: string; score: number; rank: number; totalStudents: number; percentile: number; isMainSubject: boolean; isComposite: boolean; radarValue: number } => item !== null);
+  }, [columns, row, numericColumnsMap]);
 
   // 3. 雷达图数据：仅包含单科，且分数有效（非0）
   const radarData = useMemo(() => {
@@ -158,9 +182,9 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                <div className="mb-4 flex justify-between items-center">
                  <h3 className="text-sm font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-2">
                    <svg className="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" /></svg>
-                   单科均衡度分析
+                   单科排位分析
                  </h3>
-                 <span className="text-xs text-gray-400">* 仅展示单科成绩（滤除0分）</span>
+                 <span className="text-xs text-gray-400">* 仅展示单科排名（面积越大排名越靠前）</span>
                </div>
                <div className="flex-1 w-full relative">
                 {radarData.length > 2 ? (
@@ -170,15 +194,18 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                       <PolarAngleAxis dataKey="subject" tick={{ fill: '#6b7280', fontSize: 12, fontWeight: 500 }} />
                       <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
                       <Radar
-                        name="得分率 (%)"
-                        dataKey="normalized"
+                        name="排名击败率 (%)"
+                        dataKey="radarValue"
                         stroke="#3b82f6"
                         strokeWidth={2}
                         fill="#3b82f6"
                         fillOpacity={0.3}
                       />
                       <Tooltip 
-                        formatter={(value: number) => [`${value.toFixed(1)}%`, '得分率']}
+                        formatter={(value: number, name: string, props: any) => {
+                            const item = props.payload;
+                            return [`#${item.rank} / ${item.totalStudents}`, '校次'];
+                        }}
                         contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.95)' }}
                       />
                     </RadarChart>
@@ -203,7 +230,7 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                     <tr>
                       <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">科目</th>
                       <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">得分</th>
-                      <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">满分*</th>
+                      <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">排名</th>
                       <th className="px-5 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">评级</th>
                     </tr>
                   </thead>
@@ -221,20 +248,17 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                           {item.score}
                         </td>
                         <td className="px-5 py-3 text-sm text-right text-gray-400 font-mono">
-                          {item.isComposite ? '-' : item.fullMark}
+                          {item.rank > 0 ? `#${item.rank}` : '-'}
                         </td>
                         <td className="px-5 py-3 text-sm text-center">
-                          {item.isComposite ? (
-                            <span className="text-gray-400">-</span>
-                          ) : (
-                            (() => {
-                              const grade = getGradeAttributes(item.score, item.fullMark);
-                              if (grade) {
+                          {(() => {
+                              const grade = getGradeFromPercentile(item.percentile);
+                              if (grade && item.score > 0) {
                                   return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-bold border ${grade.color}`}>{grade.label}</span>;
                               }
                               return <span className="text-gray-300">-</span>;
                             })()
-                          )}
+                          }
                         </td>
                       </tr>
                     ))}
@@ -242,7 +266,7 @@ const StudentDetailModal: React.FC<Props> = ({ isOpen, onClose, data }) => {
                 </table>
               </div>
               <div className="p-3 bg-gray-50 dark:bg-gray-900/30 border-t border-gray-100 dark:border-gray-700 text-[10px] text-gray-400 text-center">
-                * 满分值基于通用标准估算，仅供参考; 评级标准: A+≥95%, A≥90%, B≥75%, C≥60%
+                * 评级标准基于全校排名: A+(前5%), A(前15%), B(前60%), C(前95%), D(后5%)
               </div>
             </div>
           </div>
